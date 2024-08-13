@@ -1,10 +1,11 @@
-from openai import OpenAI
+from openai import OpenAI, AssistantEventHandler
 import json
 from typing_extensions import override
-from openai import AssistantEventHandler
 
+model = "gpt-4-turbo" # todo: there is error with gpt-4o + assistant api ver 1
 client = OpenAI(
-    api_key='add_your_api_key_here'
+    api_key='add_your_api_key_here',
+    default_headers={"OpenAI-Beta": "assistants=v2"}
 )
 
 # 1. detect assist's role
@@ -15,7 +16,7 @@ with open(role_extractor_path, 'r') as file:
 task = input("Your task: ")
 
 completion = client.chat.completions.create(
-    model="gpt-4o",
+    model=model,
     response_format={"type": "json_object"},
     messages=[
         {"role": "system", "content": role_extractor_prompt},
@@ -32,7 +33,7 @@ with open(new_agent_prompt_path, 'r') as file:
     agent_creator_prompt = file.read().strip()
 
 completion = client.chat.completions.create(
-    model="gpt-4o",
+    model=model,
     messages=[
         {"role": "system", "content": agent_creator_prompt},
         {"role": "user", "content": f"###\nRole: {role}"}
@@ -47,7 +48,7 @@ assistant = client.beta.assistants.create(
   name=f"{role} Assistant",
   instructions=instructions,
   tools=[{"type": "code_interpreter"}], # todo: implement tools logic later (+files)
-  model="gpt-4o",
+  model=model,
 )
 print(f"--- 3.New '{role}' Assistant: CREATED with id '{assistant.id}'")
 
@@ -109,5 +110,3 @@ while True: # todo: don't use it IRL
             event_handler=EventHandler(),
     ) as stream:
         stream.until_done()
-
-# todo: add PR to repo (?)
