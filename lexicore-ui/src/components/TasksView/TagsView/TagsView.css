@@ -1,0 +1,34 @@
+.tasks-view__cards {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+    padding: 0 40px;
+    box-sizing: border-box;
+}
+
+.tasks-card_tags {
+    padding: 20px;
+    border-radius: var(--border-radius);
+    background-color: var(--popover-bg-color);
+    display: flex;
+    flex-direction: row;
+    gap: 20px;
+    align-items: center;
+}
+
+.task-tag__cards {
+    display: flex;
+    flex-direction: row;
+    flex-wrap: nowrap;
+    gap: 20px;
+}
+
+.task-tag__container {
+    display: flex;
+    flex-direction: column;
+}
+
+.tasks-card_tags__image {
+    height: 40px;
+    width: auto;
+}

@@ -1,0 +1,17 @@
+.message-bubble {
+    background-color: rgba(255, 255, 255, .15);
+    color: var(--text-color-primary);
+    padding: 20px;
+    box-sizing: border-box;
+    border-radius: 20px;
+}
+
+.message-bubble.user {
+    background-color: rgba(255, 204, 2, .85);
+    color: var(--main-bg-color);
+    border-bottom-right-radius: 0;
+}
+
+.message-bubble:not(.user) {
+    border-bottom-left-radius: 0;
+}
