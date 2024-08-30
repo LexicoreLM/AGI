@@ -1,0 +1,21 @@
+.tasks-view__list {
+    display: flex;
+    flex-direction: row;
+    flex-wrap: wrap;;
+    gap: 20px;
+}
+
+.tasks-card {
+    padding: 20px;
+    border-radius: var(--border-radius);
+    background-color: var(--popover-bg-color);
+    display: flex;
+    flex-direction: row;
+    gap: 20px;
+    align-items: center;
+}
+
+.tasks-card__image {
+    height: 40px;
+    width: auto;
+}
