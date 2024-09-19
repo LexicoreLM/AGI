@@ -1,0 +1,39 @@
+{
+  "name": "lexicore-tool-genimage",
+  "version": "1.0.0",
+  "description": "AI tool to generate images",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "compile": "tsc",
+    "start": "npm run compile && node --inspect=9229 --es-module-specifier-resolution=node ./dist/index.js",
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "lint": "eslint --ext .js,.ts",
+    "format": "prettier --ignore-path .gitignore --write \"**/*.+(js|ts|json)\""
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@fastify/autoload": "^5.10.0",
+    "@fastify/swagger": "^8.15.0",
+    "dotenv": "^16.4.5",
+    "fastify": "^4.28.1",
+    "fastify-cli": "^6.3.0",
+    "fastify-plugin": "^4.5.1",
+    "openai": "^4.57.3",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.9.1",
+    "@types/node": "^22.5.3",
+    "@typescript-eslint/eslint-plugin": "^8.4.0",
+    "@typescript-eslint/parser": "^8.4.0",
+    "eslint": "^9.9.1",
+    "eslint-config-prettier": "^9.1.0",
+    "globals": "^15.9.0",
+    "prettier": "^3.3.3",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.5.4",
+    "typescript-eslint": "^8.4.0"
+  }
+}

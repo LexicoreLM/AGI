@@ -1,0 +1,80 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Generate images API",
+    "description": "Generate images API",
+    "license": {
+      "name": "Apache 2.0",
+      "url": "https://www.apache.org/licenses/LICENSE-2.0.html"
+    },
+    "version": "1.0.1"
+  },
+  "components": {
+    "schemas": {
+      "GenImageRequest": {
+        "type": "object",
+        "properties": {
+          "prompt": {
+            "type": "string",
+            "title": "Text prompt to generate image",
+            "description": "Text prompt to generate image",
+            "example": "a white siamese cat"
+          }
+        },
+        "required": ["prompt"]
+      },
+      "GenImageResponse": {
+        "type": "object",
+        "properties": {
+          "imageUrl": {
+            "type": "string",
+            "title": "Url to download image",
+            "description": "Url to download image",
+            "example": "http://url-to-nowhere"
+          }
+        },
+        "required": ["imageUrl"]
+      }
+    }
+  },
+  "paths": {
+    "/gen-image/generate": {
+      "post": {
+        "operationId": "generateImage",
+        "tags": ["genImage"],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/GenImageRequest" }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Generate image Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenImageResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "servers": [
+    {
+      "url": "http://localhost:3000",
+      "description": "Development server"
+    }
+  ],
+  "tags": [
+    {
+      "name": "genImage",
+      "description": "Generate images related end-points"
+    }
+  ]
+}
