@@ -1,0 +1,11 @@
+.settings__container {
+    display: flex;
+    flex-flow: row nowrap;
+}
+
+.settings__configs {
+    min-width: 400px;
+    height: 100%;
+    padding: 20px;
+    box-sizing: border-box;
+}

@@ -1,0 +1,41 @@
+.code__container .language-json {
+  white-space: break-spaces;
+  background: none;
+}
+
+.code__container {
+  background-color: var(--color-text-gray-600);
+  padding: 20px;
+  border-radius: var(--border-radius);
+  box-sizing: border-box;
+}
+
+.code__controls {
+  display: flex;
+  align-items: center;
+  flex-direction: row;
+  justify-content: end;
+  width: 100%;
+  margin-bottom: 10px;
+}
+
+.code__controls .copy-button:hover {
+  background: transparent;
+}
+
+.language-json .token.property {
+  color: #8ae9fd;
+}
+
+.language-json .token.operator {
+  color: #ff79c6;
+}
+
+.language-json .token.string {
+  color: #f1fa8c;
+}
+
+.language-json .token.number,
+.language-json .token.boolean {
+  color: var(--main-color);
+}

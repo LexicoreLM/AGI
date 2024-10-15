@@ -1,0 +1,9 @@
+.messenger__header {
+    padding: 20px 0;
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: row;
+    gap: 10px;
+    align-items: center;
+    justify-content: flex-end;
+}

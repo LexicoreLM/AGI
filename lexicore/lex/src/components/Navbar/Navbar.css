@@ -1,0 +1,25 @@
+#navbar {
+    flex: 0;
+    padding: 0;
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: row;
+    justify-content: space-between;
+}
+
+.navbar__controls {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+}
+
+#navbar__settings-btn {
+    cursor: pointer;
+    width: 35px;
+    height: 35px;
+    border-radius: 50%;
+    border: 1px solid var(--color-text-gray-300);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
