@@ -5,7 +5,9 @@ import SendIcon from '@mui/icons-material/Send';
 const ChatInput = () => {
     const [text, setText] = useState<string>("");
 
-    const handleSend = useCallback(() => null, []);
+    const handleSend = useCallback(() => {
+        console.log(text)
+    }, []);
 
     const handleChange = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
         setText(event.target.value);
