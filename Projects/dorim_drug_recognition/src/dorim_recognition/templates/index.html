@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <title>Dorim — Drug Recognition</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    :root {
+      --bg: #0f1115;
+      --panel: #181a20;
+      --panel-2: #1f2230;
+      --fg: #e6e8ee;
+      --muted: #8a90a3;
+      --accent: #5eead4;
+      --warn: #f59e0b;
+      --bad: #ef4444;
+      --border: #2a2e3a;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: 32px 16px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg); color: var(--fg);
+    }
+    .wrap { max-width: 960px; margin: 0 auto; }
+    h1 { margin: 0 0 4px; font-size: 22px; }
+    .sub { color: var(--muted); font-size: 13px; margin-bottom: 24px; }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 20px;
+      margin-bottom: 16px;
+    }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .row3 { display: grid; grid-template-columns: 2fr 2fr 1fr 1fr; gap: 12px; }
+    label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+    input[type="text"], input[type="number"], input[type="file"] {
+      width: 100%; padding: 10px 12px;
+      background: var(--panel-2); color: var(--fg);
+      border: 1px solid var(--border); border-radius: 8px;
+      font-size: 14px;
+    }
+    button {
+      padding: 10px 18px; font-size: 14px; font-weight: 600;
+      background: var(--accent); color: #0c1410; border: 0; border-radius: 8px;
+      cursor: pointer;
+    }
+    button:hover { filter: brightness(1.1); }
+    .actions { margin-top: 16px; display: flex; gap: 12px; align-items: center; }
+    .candidate {
+      padding: 12px 14px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      margin-bottom: 8px;
+      background: var(--panel-2);
+    }
+    .conf {
+      display: inline-block; padding: 2px 8px; border-radius: 999px;
+      font-weight: 700; font-size: 12px; margin-right: 8px;
+    }
+    .conf.high { background: rgba(94, 234, 212, 0.18); color: var(--accent); }
+    .conf.med  { background: rgba(245, 158, 11, 0.18); color: var(--warn); }
+    .conf.low  { background: rgba(239, 68, 68, 0.18);  color: var(--bad); }
+    .comp { color: var(--muted); font-size: 12px; margin-top: 4px; }
+    .meta { color: var(--muted); font-size: 12px; }
+    .pid { color: var(--muted); font-size: 12px; }
+    .tabs { display: flex; gap: 8px; margin-bottom: 16px; }
+    .tabs a {
+      padding: 8px 14px; border: 1px solid var(--border); border-radius: 8px;
+      text-decoration: none; color: var(--fg); font-size: 13px;
+    }
+    .tabs a.active { background: var(--accent); color: #0c1410; border-color: var(--accent); }
+    .empty { color: var(--muted); padding: 12px 0; }
+    .badge {
+      display: inline-block; font-size: 11px; padding: 1px 8px;
+      background: rgba(94, 234, 212, 0.18); color: var(--accent);
+      border-radius: 999px; margin-left: 6px;
+    }
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Dorim · Drug Recognition</h1>
+  <div class="sub">
+    Принимает <em>название</em> и <em>производителя</em>, возвращает наиболее релевантные товары
+    из каталога с оценкой вероятности.
+    <a href="/docs" style="color: var(--accent); margin-left: 8px;">OpenAPI →</a>
+  </div>
+
+  <div class="tabs">
+    <a href="#single" data-tab="single" class="active" onclick="event.preventDefault(); show('single', event)">Один запрос</a>
+    <a href="#batch"  data-tab="batch"  onclick="event.preventDefault(); show('batch',  event)">Batch (файл)</a>
+  </div>
+
+  <div id="single">
+    <form class="panel" method="post" action="/">
+      <div class="row3">
+        <div>
+          <label>Название</label>
+          <input type="text" name="name" required value="{{ form.name if form else '' }}"
+                 placeholder="напр. Найз таб. 100мг №20">
+        </div>
+        <div>
+          <label>Производитель</label>
+          <input type="text" name="maker_name" value="{{ form.maker_name if form else '' }}"
+                 placeholder="напр. Dr.Reddys lab, Индия">
+        </div>
+        <div>
+          <label>Контрагент (опц.)</label>
+          <input type="text" name="contractor_id" value="{{ form.contractor_id if form else '' }}"
+                 placeholder="id">
+        </div>
+        <div>
+          <label>Top-N</label>
+          <input type="number" name="top_n" min="1" max="20" value="{{ (form.top_n if form else 5) }}">
+        </div>
+      </div>
+      <div class="actions">
+        <button type="submit">Распознать</button>
+      </div>
+    </form>
+
+    {% if result is not none %}
+      <div class="panel">
+        <div class="meta">
+          {% if result.exact_alias_hit %}
+            <span class="badge">точное совпадение по истории привязок</span>
+          {% endif %}
+          <span style="float: right">
+            {% for k, v in result.stage_ms.items() %}
+              <code>{{ k }}: {{ "%.1f"|format(v) }}ms</code>&nbsp;
+            {% endfor %}
+          </span>
+        </div>
+        {% if not result.candidates %}
+          <div class="empty">Кандидатов не найдено.</div>
+        {% else %}
+          {% for c in result.candidates %}
+            {% set cls = 'high' if c.confidence >= 0.7 else ('med' if c.confidence >= threshold else 'low') %}
+            <div class="candidate">
+              <span class="conf {{ cls }}">{{ "%.0f"|format(c.confidence * 100) }}%</span>
+              <strong>{{ c.search_string }}</strong>
+              <span class="pid">· id {{ c.product_id }}</span>
+              {% if c.components %}
+                <div class="comp">
+                  {% for k, v in c.components.items() %}
+                    <code>{{ k }}={{ "%.2f"|format(v) }}</code>&nbsp;
+                  {% endfor %}
+                </div>
+              {% endif %}
+            </div>
+          {% endfor %}
+        {% endif %}
+      </div>
+    {% endif %}
+  </div>
+
+  <div id="batch" style="display: none;">
+    <form class="panel" method="post" action="/match/batch" enctype="multipart/form-data">
+      <div class="row">
+        <div>
+          <label>Файл (xlsx / csv)</label>
+          <input type="file" name="file" accept=".xlsx,.xls,.csv,.tsv" required>
+        </div>
+        <div>
+          <label>Top-N кандидатов на строку</label>
+          <input type="number" name="top_n" value="3" min="1" max="10">
+        </div>
+      </div>
+      <div class="meta" style="margin-top: 12px;">
+        Колонки (любой из вариантов, регистр не важен):
+        <code>name|название|наименование|товар</code>,
+        <code>maker|производитель</code>,
+        <code>contractor_id</code> (опционально).
+      </div>
+      <div class="actions">
+        <button type="submit">Обработать и скачать</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<script>
+  function show(tab, evt) {
+    document.getElementById('single').style.display = tab === 'single' ? '' : 'none';
+    document.getElementById('batch').style.display  = tab === 'batch'  ? '' : 'none';
+    document.querySelectorAll('.tabs a').forEach(a => a.classList.remove('active'));
+    var target = (evt && evt.target) || document.querySelector('.tabs a[data-tab="' + tab + '"]');
+    if (target) target.classList.add('active');
+  }
+  // Default tab: if the server rendered a result, always show "single";
+  // otherwise honor the URL hash; otherwise default to "single".
+  (function initialTab() {
+    var hasResult = document.querySelector('#single .panel:nth-of-type(2)') !== null;
+    if (hasResult) { show('single'); return; }
+    show(location.hash === '#batch' ? 'batch' : 'single');
+  })();
+</script>
+</body>
+</html>
