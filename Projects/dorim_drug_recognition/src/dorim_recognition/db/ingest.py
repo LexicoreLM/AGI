@@ -26,6 +26,7 @@ from dorim_recognition.matching.normalize import (
     normalize_maker,
     normalize_text,
 )
+from dorim_recognition.matching.parse_catalog import parse_search_string
 
 
 def _pg_float_array(xs: Iterable[float]) -> str:
@@ -75,6 +76,14 @@ def ingest_products() -> int:
         search_string = r["search_string"] or ""
         normalized = normalize_text(search_string)
         feats = extract_dosage_features(normalized)
+        # Parse on the ORIGINAL (lowercased) catalog string -- we need
+        # the original word boundaries to detect country tokens reliably,
+        # and we want to keep the maker text as-is for human display.
+        parsed = parse_search_string(search_string.lower())
+        # Maker for matching is normalized; head is the lowercased original
+        # head section. Country we just store raw for filtering / UI.
+        norm_maker = normalize_maker(parsed.maker)
+        norm_head = normalize_text(parsed.head)
         buf.write(_copy_line(
             drug_id,
             search_string,
@@ -85,6 +94,9 @@ def ingest_products() -> int:
             _pg_float_array(sorted(feats.me)),
             _pg_float_array(sorted(feats.percent)),
             feats.count,
+            norm_head,
+            norm_maker,
+            parsed.country,
         ))
     payload = buf.getvalue()
 
@@ -94,7 +106,8 @@ def ingest_products() -> int:
             copy_sql = (
                 f"COPY {settings.engine_schema}.products "
                 "(id, search_string, normalized, mg_values, ml_values, g_values, "
-                "me_values, percent_values, count_n) FROM STDIN"
+                "me_values, percent_values, count_n, head, maker_canonical, country) "
+                "FROM STDIN"
             )
             with cur.copy(copy_sql) as cp:
                 cp.write(payload)

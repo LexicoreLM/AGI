@@ -3,18 +3,24 @@
 from __future__ import annotations
 
 import io
-from typing import BinaryIO
+from typing import Callable
 
 import pandas as pd
 from loguru import logger
 
-from dorim_recognition.matching.engine import MatchQuery, match_batch
+from dorim_recognition.matching.engine import MatchQuery, match, match_batch
 
 
 # Column name aliases (lowercase) — we try several to be tolerant of input layouts.
 _NAME_COLS = ("name", "product_name", "название", "наименование", "товар")
 _MAKER_COLS = ("maker", "maker_name", "manufacturer", "производитель", "изготовитель")
 _CONTRACTOR_COLS = ("contractor_id", "contractor", "контрагент")
+# External product code provided by the caller — preserved verbatim and echoed
+# back in the output as the canonical column ``external_code``.
+_EXT_CODE_COLS = (
+    "external_code", "external_id", "external", "артикул",
+    "код", "код товара", "товар_код", "sku", "id_external",
+)
 
 
 def _pick_column(df: pd.DataFrame, candidates: tuple[str, ...]) -> str | None:
@@ -37,8 +43,23 @@ def read_input(file_bytes: bytes, filename: str) -> pd.DataFrame:
     raise ValueError(f"Unsupported file extension: {filename}")
 
 
-def process_dataframe(df: pd.DataFrame, *, top_n: int = 3) -> pd.DataFrame:
-    """Run matching for every row and return a DataFrame with augmented columns."""
+def process_dataframe(
+    df: pd.DataFrame,
+    *,
+    top_n: int = 3,
+    progress_cb: Callable[[int, int], None] | None = None,
+    cancel_cb: Callable[[], bool] | None = None,
+) -> pd.DataFrame:
+    """Run matching for every row and return a DataFrame with augmented columns.
+
+    ``progress_cb(processed, total)`` is invoked periodically (~every 1% of
+    rows) with cumulative counts -- used by the async job runner to update
+    progress without coupling to it.
+
+    ``cancel_cb()`` is polled at the same cadence; if it returns True we
+    stop early and return whatever rows have been processed so far. The
+    caller is responsible for raising / propagating the cancellation status.
+    """
     name_col = _pick_column(df, _NAME_COLS)
     if name_col is None:
         raise ValueError(
@@ -47,6 +68,7 @@ def process_dataframe(df: pd.DataFrame, *, top_n: int = 3) -> pd.DataFrame:
         )
     maker_col = _pick_column(df, _MAKER_COLS)
     contractor_col = _pick_column(df, _CONTRACTOR_COLS)
+    ext_code_col = _pick_column(df, _EXT_CODE_COLS)
 
     queries: list[MatchQuery] = []
     for _, row in df.iterrows():
@@ -62,26 +84,46 @@ def process_dataframe(df: pd.DataFrame, *, top_n: int = 3) -> pd.DataFrame:
                 contractor_id = None
         queries.append(MatchQuery(name=name, maker_name=maker, contractor_id=contractor_id))
 
-    logger.info("batch: processing {} rows (top_n={})", len(queries), top_n)
-    results = match_batch(queries, top_n=top_n)
+    total = len(queries)
+    logger.info("batch: processing {} rows (top_n={})", total, top_n)
 
-    # Flatten: for each input row produce columns
-    #   matched_product_id, matched_search_string, confidence, exact_alias_hit,
-    # plus top_2_id / top_2_confidence / top_3_id / top_3_confidence (configurable).
-    out_records = []
-    for src, res in zip(df.to_dict(orient="records"), results, strict=True):
+    # Streaming match loop so we can report progress.
+    # We deliberately don't call match_batch() in one shot any more.
+    records = df.to_dict(orient="records")
+    out_records: list[dict] = []
+    # Report at most ~100 times for any size of input (1% granularity).
+    step = max(1, total // 100)
+    for i, (src, q) in enumerate(zip(records, queries, strict=True), 1):
+        res = match(q, top_n=top_n)
         rec = dict(src)
+        # Promote external code to the canonical key so consumers don't have
+        # to know which alias was used in the input (артикул / sku / ...).
+        if ext_code_col and ext_code_col != "external_code":
+            val = rec.get(ext_code_col)
+            if val is not None and (not isinstance(val, float) or not pd.isna(val)):
+                rec["external_code"] = val
         top = res.candidates[0] if res.candidates else None
         rec["matched_product_id"] = top.product_id if top else None
         rec["matched_search_string"] = top.search_string if top else None
         rec["confidence"] = top.confidence if top else 0.0
+        rec["confidence_percent"] = round((top.confidence if top else 0.0) * 100, 1)
         rec["exact_alias_hit"] = res.exact_alias_hit
-        for i in range(1, top_n):
-            cand = res.candidates[i] if len(res.candidates) > i else None
-            rec[f"alt_{i}_id"] = cand.product_id if cand else None
-            rec[f"alt_{i}_search_string"] = cand.search_string if cand else None
-            rec[f"alt_{i}_confidence"] = cand.confidence if cand else None
+        for j in range(1, top_n):
+            cand = res.candidates[j] if len(res.candidates) > j else None
+            rec[f"alt_{j}_id"] = cand.product_id if cand else None
+            rec[f"alt_{j}_search_string"] = cand.search_string if cand else None
+            rec[f"alt_{j}_confidence"] = cand.confidence if cand else None
+            rec[f"alt_{j}_confidence_percent"] = (
+                round(cand.confidence * 100, 1) if cand else None
+            )
         out_records.append(rec)
+
+        if i % step == 0 or i == total:
+            if progress_cb is not None:
+                progress_cb(i, total)
+            if cancel_cb is not None and cancel_cb():
+                logger.info("batch cancelled at row {}/{}", i, total)
+                break
 
     return pd.DataFrame(out_records)
 
@@ -95,10 +137,21 @@ def to_xlsx_bytes(df: pd.DataFrame) -> bytes:
     return buf.getvalue()
 
 
-def process_stream(file_bytes: bytes, filename: str, *, top_n: int = 3) -> tuple[bytes, str]:
-    """End-to-end: bytes in -> xlsx bytes out + output filename."""
+def process_stream(
+    file_bytes: bytes,
+    filename: str,
+    *,
+    top_n: int = 3,
+    progress_cb: Callable[[int, int], None] | None = None,
+    cancel_cb: Callable[[], bool] | None = None,
+) -> tuple[bytes, str, bool]:
+    """End-to-end: bytes in -> xlsx bytes out + output filename + cancelled flag."""
     df = read_input(file_bytes, filename)
-    result_df = process_dataframe(df, top_n=top_n)
+    result_df = process_dataframe(
+        df, top_n=top_n, progress_cb=progress_cb, cancel_cb=cancel_cb,
+    )
     out_bytes = to_xlsx_bytes(result_df)
     base = filename.rsplit(".", 1)[0]
-    return out_bytes, f"{base}__matched.xlsx"
+    # If the result has fewer rows than the input, the run was cancelled mid-loop.
+    cancelled = len(result_df) < len(df)
+    return out_bytes, f"{base}__matched.xlsx", cancelled

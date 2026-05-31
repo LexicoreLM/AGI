@@ -9,12 +9,13 @@ from pathlib import Path
 from typing import AsyncIterator
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from loguru import logger
 
 from dorim_recognition.api.batch import process_stream
+from dorim_recognition.api.jobs import REGISTRY, BatchJob, BatchCancelled
 from dorim_recognition.api.schemas import (
     HealthResponse,
     MatchCandidateOut,
@@ -81,6 +82,7 @@ def match_endpoint(req: MatchRequest) -> MatchResponse:
             product_id=c.product_id,
             search_string=c.search_string,
             confidence=c.confidence,
+            confidence_percent=round(c.confidence * 100, 1),
             components=c.components,
         )
         for c in res.candidates
@@ -94,6 +96,7 @@ def match_endpoint(req: MatchRequest) -> MatchResponse:
         candidates=candidates,
         exact_alias_hit=res.exact_alias_hit,
         stage_ms={k: round(v, 2) for k, v in res.stage_ms.items()},
+        external_code=req.external_code,
     )
 
 
@@ -122,32 +125,99 @@ def _log_match(req: MatchRequest, res) -> None:
 
 
 @app.post("/match/batch")
-async def batch_endpoint(
+async def batch_submit(
     file: UploadFile = File(...),
     top_n: int = Form(3),
-) -> Response:
-    """Batch matching: upload xlsx/csv, get xlsx back.
+) -> JSONResponse:
+    """Submit a batch job. Returns immediately with a ``job_id``.
 
     Expected columns (case-insensitive, any one variant):
       - name: 'name' / 'product_name' / 'название' / 'наименование' / 'товар'
       - maker: 'maker' / 'maker_name' / 'manufacturer' / 'производитель' / 'изготовитель'
       - contractor_id (optional): 'contractor_id' / 'contractor' / 'контрагент'
+
+    Poll ``GET /match/batch/{job_id}`` for progress, then
+    ``GET /match/batch/{job_id}/download`` when ``download_ready=true``.
     """
     settings = get_settings()
     raw = await file.read()
     if len(raw) > settings.max_upload_mb * 1024 * 1024:
         raise HTTPException(status_code=413, detail=f"File too large (>{settings.max_upload_mb} MB)")
-    t0 = time.perf_counter()
-    try:
-        out_bytes, out_name = process_stream(raw, file.filename or "input.xlsx", top_n=top_n)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    logger.info("batch processed in {:.2f}s -> {}", time.perf_counter() - t0, out_name)
+
+    filename = file.filename or "input.xlsx"
+    job = REGISTRY.create(filename)
+
+    def work(j: BatchJob) -> None:
+        t0 = time.perf_counter()
+        out_bytes, out_name, cancelled = process_stream(
+            raw,
+            filename,
+            top_n=top_n,
+            progress_cb=lambda done, total: _update_progress(j, done, total),
+            cancel_cb=lambda: j.cancel_requested,
+        )
+        # Always offer a (possibly partial) result so users don't lose work.
+        j.result_bytes = out_bytes
+        j.result_filename = out_name
+        if cancelled:
+            j.status = "cancelled"
+            logger.info(
+                "batch job {} CANCELLED at {}/{} after {:.2f}s",
+                j.job_id, j.processed, j.total, time.perf_counter() - t0,
+            )
+        else:
+            logger.info(
+                "batch job {} processed {} rows in {:.2f}s -> {}",
+                j.job_id, j.total, time.perf_counter() - t0, out_name,
+            )
+
+    REGISTRY.submit(job, work)
+    return JSONResponse({"job_id": job.job_id, "filename": filename})
+
+
+def _update_progress(job: BatchJob, processed: int, total: int) -> None:
+    """Mutate progress fields. Set total on first call."""
+    if not job.total:
+        job.total = total
+    job.processed = processed
+
+
+@app.get("/match/batch/{job_id}")
+def batch_status(job_id: str) -> JSONResponse:
+    job = REGISTRY.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    return JSONResponse(job.to_public())
+
+
+@app.get("/match/batch/{job_id}/download")
+def batch_download(job_id: str) -> Response:
+    job = REGISTRY.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    if job.result_bytes is None or job.status not in ("done", "cancelled"):
+        raise HTTPException(status_code=409, detail=f"job not ready (status={job.status})")
     return Response(
-        content=out_bytes,
+        content=job.result_bytes,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f'attachment; filename="{out_name}"'},
+        headers={"Content-Disposition": f'attachment; filename="{job.result_filename}"'},
     )
+
+
+@app.post("/match/batch/{job_id}/cancel")
+def batch_cancel(job_id: str) -> JSONResponse:
+    """Request cancellation. The worker stops at the next progress checkpoint
+    (typically within ~1% of total rows). The job's processed-so-far rows are
+    still downloadable as a partial result."""
+    if not REGISTRY.request_cancel(job_id):
+        job = REGISTRY.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="job not found")
+        raise HTTPException(
+            status_code=409,
+            detail=f"job already terminal (status={job.status})",
+        )
+    return JSONResponse({"cancel_requested": True})
 
 
 # -----------------------------------------------------------------------------
@@ -165,6 +235,7 @@ def index_match(
     name: str = Form(...),
     maker_name: str = Form(""),
     contractor_id: str = Form(""),
+    external_code: str = Form(""),
     top_n: int = Form(5),
 ) -> HTMLResponse:
     contractor = None
@@ -183,7 +254,14 @@ def index_match(
         "index.html",
         {
             "result": res,
-            "form": {"name": name, "maker_name": maker_name, "contractor_id": contractor_id, "top_n": top_n},
+            "form": {
+                "name": name,
+                "maker_name": maker_name,
+                "contractor_id": contractor_id,
+                "external_code": external_code,
+                "top_n": top_n,
+            },
+            "external_code": external_code.strip() or None,
             "threshold": settings.low_confidence_threshold,
         },
     )

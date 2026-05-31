@@ -58,8 +58,10 @@ _DANGLING_DOT = re.compile(r"(?<!\d)\.(?!\d)")
 _DANGLING_COMMA = re.compile(r"(?<!\d),(?!\d)")
 # Replace common form abbreviations to canonical short form for better trigram hits.
 _FORM_SYNONYMS = [
+    # Order matters: longer/more-specific forms first.
     (re.compile(r"\bтаблетк[аиыу]?\b"), "табл"),
     (re.compile(r"\bтабл\.?\b"), "табл"),
+    (re.compile(r"\bтаб\.?\b"), "табл"),  # "Парацетамол таб 500мг" -- canonicalize to "табл".
     (re.compile(r"\bкапсул[аыуы]?\b"), "капс"),
     (re.compile(r"\bкапс\.?\b"), "капс"),
     (re.compile(r"\bраствор[а-я]*\b"), "р-р"),
@@ -77,6 +79,12 @@ _FORM_SYNONYMS = [
     (re.compile(r"\bд/ин\.?\b"), "д/ин"),
 ]
 
+# Insert a space between a digit and a unit so "500мг" and "500 мг" normalize
+# to the same form. Apply BEFORE _UNIT_SYNONYMS so it works on raw input.
+_DIGIT_UNIT_SPLIT = re.compile(
+    r"(\d)\s*(мг|мл|г|ме|мкг|кг|л|%)\b",
+)
+
 
 def normalize_text(s: str | None) -> str:
     """Aggressively normalize a string for matching/indexing.
@@ -87,6 +95,9 @@ def normalize_text(s: str | None) -> str:
         return ""
     s = s.lower()
     s = _NOISE.sub(" ", s)
+
+    # Always separate digits from units before further processing.
+    s = _DIGIT_UNIT_SPLIT.sub(r"\1 \2", s)
 
     # Unit/form synonyms applied on text with words still separated by spaces.
     for pat, repl in _UNIT_SYNONYMS:

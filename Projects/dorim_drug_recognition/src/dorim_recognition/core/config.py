@@ -39,9 +39,15 @@ class Settings(BaseSettings):
     tfidf_ngram_min: int = 3
     tfidf_ngram_max: int = 5
     # Hybrid score weights (must sum to 1.0).
-    w_fuzzy: float = 0.40
-    w_tfidf: float = 0.30
-    w_maker: float = 0.20
+    # Maker carries a high weight because it's the strongest discriminator
+    # between catalog entries that share the same active substance + dose --
+    # without it, "Парацетамол 500мг №10" from Узхимфарм vs SIA Pharma would
+    # tie purely on the name. Empirically 0.30 is the sweet spot: any higher
+    # and noisy/garbage maker fields drag legitimate matches down on
+    # historical operator data.
+    w_fuzzy: float = 0.35
+    w_tfidf: float = 0.25
+    w_maker: float = 0.30
     w_dosage: float = 0.10
     # Confidence threshold below which we tag the result as "low_confidence".
     low_confidence_threshold: float = 0.55

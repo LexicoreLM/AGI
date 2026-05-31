@@ -7,7 +7,8 @@
       "runtimeArgs": [
         "run", "uvicorn", "dorim_recognition.api.app:app",
         "--host", "127.0.0.1", "--port", "8765",
-        "--reload", "--reload-dir", "src"
+        "--reload", "--reload-dir", "src",
+        "--reload-include", "*.html"
       ],
       "port": 8765
     }

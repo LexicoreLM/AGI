@@ -93,6 +93,8 @@ class _CatalogIndex:
     product_ids: np.ndarray  # shape (N,)
     search_strings: list[str]
     normalized: list[str]
+    makers_canonical: list[str]  # parsed maker tokens only (or empty)
+    countries: list[str]
     dose_features: list[DosageFeatures]
     id_to_pos: dict[int, int]
     vectorizer: TfidfVectorizer
@@ -117,8 +119,8 @@ def _build_index() -> _CatalogIndex:
     with raw_connection(autocommit=True) as conn:
         with conn.cursor() as cur:
             cur.execute(
-                f"SELECT id, search_string, normalized, mg_values, ml_values, g_values, "
-                f"me_values, percent_values, count_n "
+                f"SELECT id, search_string, normalized, maker_canonical, country, "
+                f"mg_values, ml_values, g_values, me_values, percent_values, count_n "
                 f"FROM {settings.engine_schema}.products ORDER BY id"
             )
             rows = cur.fetchall()
@@ -126,6 +128,8 @@ def _build_index() -> _CatalogIndex:
     product_ids = np.array([r["id"] for r in rows], dtype=np.int64)
     search_strings = [r["search_string"] for r in rows]
     normalized = [r["normalized"] for r in rows]
+    makers_canonical = [r["maker_canonical"] for r in rows]
+    countries = [r["country"] for r in rows]
     dose_features = [
         DosageFeatures(
             mg=frozenset(r["mg_values"] or ()),
@@ -164,6 +168,8 @@ def _build_index() -> _CatalogIndex:
         product_ids=product_ids,
         search_strings=search_strings,
         normalized=normalized,
+        makers_canonical=makers_canonical,
+        countries=countries,
         dose_features=dose_features,
         id_to_pos=id_to_pos,
         vectorizer=vectorizer,
@@ -239,6 +245,87 @@ def _trigram_candidates(
 # Stage 2 — rerank
 # -----------------------------------------------------------------------------
 
+# Below this raw partial_ratio the maker is treated as "absent" in the product.
+# Empirically 0.5 (i.e. 50%) on noisy cyrillic data filters incidental matches
+# while keeping legitimate transliteration / abbreviation cases.
+_MAKER_FLOOR = 0.5
+
+# Country names that frequently appear inside maker_name input. We strip them
+# so "ИНДИЯ, Dr.Reddys lab" -> "dr reddys lab" rather than "dr reddys lab индия"
+# (the country is checked separately via the country bonus path).
+_COUNTRY_STOP_TOKENS = frozenset({
+    "индия", "россия", "узбекистан", "украина", "беларусь", "германия", "франция",
+    "италия", "польша", "сша", "китай", "корея", "турция", "венгрия", "словения",
+    "испания", "швейцария", "болгария", "вьетнам", "пакистан", "казахстан",
+    "грузия", "армения", "молдова", "австрия", "нидерланды", "великобритания",
+    "ирландия", "греция", "португалия",
+})
+
+
+def _maker_score(
+    query_maker: str,
+    product_maker: str,
+    product_country: str = "",
+    product_norm: str = "",
+) -> float:
+    """Strict manufacturer scoring using the catalog's parsed maker field.
+
+    Compares the input manufacturer string against the catalog row's
+    ``maker_canonical`` (extracted by ``parse_search_string``). This avoids
+    the previous bug where country tokens inside the FULL product string
+    inflated the score for the wrong product.
+
+    Strategy:
+      - No query maker -> 0.5 (neutral, no signal).
+      - Strip country tokens from the query (e.g. "ИНДИЯ, Dr.Reddys lab"
+        becomes "dr reddys lab") -- country is matched separately via the
+        country bonus.
+      - If catalog has a parsed maker: use ``token_set_ratio`` (handles
+        word reorder) + ``partial_ratio`` (handles substring), take max.
+        Pass through a steep curve to suppress incidental matches.
+      - Country bonus: if the country token appears in the query maker
+        string AND the maker score is low, lift the floor to 0.4 so a
+        country-only signal isn't completely lost.
+      - Fall back to comparing against ``product_norm`` if the catalog has
+        no parsed maker (~4.5% of rows).
+    """
+    if not query_maker:
+        return 0.5
+
+    # Strip out country tokens from the query -- they're scored separately.
+    q_tokens = [t for t in query_maker.split() if t not in _COUNTRY_STOP_TOKENS]
+    q_core = " ".join(q_tokens)
+    if not q_core:
+        # query was ONLY a country -- weak signal, see if country matches.
+        if product_country and any(t in product_country for t in query_maker.split()):
+            return 0.5
+        return 0.2
+
+    if product_maker:
+        target = product_maker
+        ts = fuzz.token_set_ratio(q_core, target) / 100.0
+        pr = fuzz.partial_ratio(q_core, target) / 100.0
+        raw = max(ts, pr)
+    else:
+        # Fallback to legacy "match against full product" behaviour.
+        raw = fuzz.partial_ratio(q_core, product_norm) / 100.0
+
+    steep = max(0.0, min(1.0, (raw - _MAKER_FLOOR) / (1.0 - _MAKER_FLOOR)))
+
+    # Token-membership floor.
+    q_long = [t for t in q_core.split() if len(t) >= 4]
+    if q_long and product_maker:
+        hits = sum(1 for t in q_long if t in product_maker)
+        if hits:
+            steep = max(steep, 0.6 + 0.4 * (hits / len(q_long)))
+
+    # Country bonus: even if maker doesn't match, partial credit if the user
+    # at least named the right country -- distinguishes regional variants.
+    if product_country and product_country in query_maker:
+        steep = max(steep, 0.4)
+
+    return float(steep)
+
 def _rerank(
     index: _CatalogIndex,
     settings: Settings,
@@ -268,19 +355,15 @@ def _rerank(
     # --- Fuzzy on the full normalized string (token-set is robust to reorder).
     # --- Maker fuzzy (partial_ratio is permissive about extra country tails).
     # --- Dosage structured similarity.
-    n_makers = [index.normalized[p] for p in positions]
     fuzzy_scores = np.empty(positions.size, dtype=np.float32)
     maker_scores = np.empty(positions.size, dtype=np.float32)
     dose_scores = np.empty(positions.size, dtype=np.float32)
     for i, p in enumerate(positions):
         product_norm = index.normalized[p]
+        product_maker = index.makers_canonical[p]
+        product_country = index.countries[p]
         fuzzy_scores[i] = fuzz.token_set_ratio(n_name, product_norm) / 100.0
-        if n_maker:
-            # Compare query maker against the FULL product string -- the maker
-            # token usually lives inside it (e.g. "...dr.reddy's индия").
-            maker_scores[i] = fuzz.partial_ratio(n_maker, product_norm) / 100.0
-        else:
-            maker_scores[i] = 0.5  # neutral if no maker provided
+        maker_scores[i] = _maker_score(n_maker, product_maker, product_country, product_norm)
         dose_scores[i] = dosage_similarity(query_features, index.dose_features[p])
 
     final = (

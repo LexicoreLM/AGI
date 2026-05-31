@@ -78,6 +78,41 @@
       border-radius: 999px; margin-left: 6px;
     }
     code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    /* progress UI */
+    .progress-wrap { display: none; margin-top: 16px; }
+    .progress-bar {
+      height: 8px; background: var(--panel-2); border-radius: 999px;
+      overflow: hidden; border: 1px solid var(--border);
+    }
+    .progress-fill {
+      height: 100%; width: 0%; background: var(--accent);
+      transition: width 0.4s ease;
+    }
+    .progress-meta {
+      display: flex; justify-content: space-between;
+      color: var(--muted); font-size: 12px; margin-top: 6px;
+    }
+    .spinner {
+      display: inline-block; width: 12px; height: 12px;
+      border: 2px solid var(--border); border-top-color: var(--accent);
+      border-radius: 50%; animation: spin 0.9s linear infinite;
+      vertical-align: -2px; margin-right: 8px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .progress-error { color: var(--bad); font-size: 13px; margin-top: 8px; }
+    .progress-done {
+      display: none; margin-top: 12px; padding: 12px;
+      background: rgba(94, 234, 212, 0.10);
+      border: 1px solid rgba(94, 234, 212, 0.35);
+      border-radius: 8px;
+    }
+    .progress-done a { color: var(--accent); font-weight: 700; text-decoration: none; }
+    button[disabled] { opacity: 0.5; cursor: not-allowed; }
+    .btn-secondary {
+      background: var(--panel-2); color: var(--fg);
+      border: 1px solid var(--border);
+    }
+    .btn-secondary:hover { background: rgba(239, 68, 68, 0.18); color: var(--bad); border-color: var(--bad); }
   </style>
 </head>
 <body>
@@ -117,6 +152,14 @@
           <input type="number" name="top_n" min="1" max="20" value="{{ (form.top_n if form else 5) }}">
         </div>
       </div>
+      <div class="row" style="margin-top: 12px;">
+        <div>
+          <label>Внешний код товара (опц.)</label>
+          <input type="text" name="external_code" value="{{ form.external_code if form else '' }}"
+                 placeholder="артикул / SKU — вернётся вместе с ответом">
+        </div>
+        <div></div>
+      </div>
       <div class="actions">
         <button type="submit">Распознать</button>
       </div>
@@ -125,6 +168,11 @@
     {% if result is not none %}
       <div class="panel">
         <div class="meta">
+          {% if external_code %}
+            <span class="badge" style="background: rgba(245, 158, 11, 0.18); color: var(--warn);">
+              внешний код: <code>{{ external_code }}</code>
+            </span>
+          {% endif %}
           {% if result.exact_alias_hit %}
             <span class="badge">точное совпадение по истории привязок</span>
           {% endif %}
@@ -158,25 +206,48 @@
   </div>
 
   <div id="batch" style="display: none;">
-    <form class="panel" method="post" action="/match/batch" enctype="multipart/form-data">
+    <form id="batchForm" class="panel" enctype="multipart/form-data">
       <div class="row">
         <div>
           <label>Файл (xlsx / csv)</label>
-          <input type="file" name="file" accept=".xlsx,.xls,.csv,.tsv" required>
+          <input type="file" id="batchFile" name="file" accept=".xlsx,.xls,.csv,.tsv" required>
         </div>
         <div>
           <label>Top-N кандидатов на строку</label>
-          <input type="number" name="top_n" value="3" min="1" max="10">
+          <input type="number" id="batchTopN" name="top_n" value="3" min="1" max="10">
         </div>
       </div>
       <div class="meta" style="margin-top: 12px;">
         Колонки (любой из вариантов, регистр не важен):
         <code>name|название|наименование|товар</code>,
         <code>maker|производитель</code>,
-        <code>contractor_id</code> (опционально).
+        <code>contractor_id</code>,
+        <code>external_code|артикул|sku|код|код&nbsp;товара</code>
+        (последние две — опционально, внешний код возвращается в результатах).
       </div>
       <div class="actions">
-        <button type="submit">Обработать и скачать</button>
+        <button id="batchSubmit" type="submit">Обработать</button>
+        <button id="batchCancel" type="button" class="btn-secondary" style="display: none;">Стоп</button>
+      </div>
+
+      <div id="progressWrap" class="progress-wrap">
+        <div style="display: flex; align-items: center; margin-bottom: 8px;">
+          <span class="spinner" id="progressSpinner"></span>
+          <strong id="progressLabel">Готовлю...</strong>
+        </div>
+        <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+        <div class="progress-meta">
+          <span id="progressCount">0 / 0</span>
+          <span id="progressRate">—</span>
+          <span id="progressEta">—</span>
+        </div>
+        <div id="progressError" class="progress-error" style="display: none;"></div>
+      </div>
+
+      <div id="progressDone" class="progress-done">
+        <strong id="doneLabel">Готово.</strong>
+        <a id="downloadLink" href="#" download>Скачать результат →</a>
+        <span class="meta" id="doneStats" style="margin-left: 12px;"></span>
       </div>
     </form>
   </div>
@@ -196,6 +267,155 @@
     var hasResult = document.querySelector('#single .panel:nth-of-type(2)') !== null;
     if (hasResult) { show('single'); return; }
     show(location.hash === '#batch' ? 'batch' : 'single');
+  })();
+
+  // ---- Batch upload + progress polling -----------------------------------
+  (function batchUI() {
+    var form     = document.getElementById('batchForm');
+    var submit   = document.getElementById('batchSubmit');
+    var cancelBtn= document.getElementById('batchCancel');
+    var fileEl   = document.getElementById('batchFile');
+    var topNEl   = document.getElementById('batchTopN');
+    var wrap     = document.getElementById('progressWrap');
+    var spinner  = document.getElementById('progressSpinner');
+    var label    = document.getElementById('progressLabel');
+    var fill     = document.getElementById('progressFill');
+    var count    = document.getElementById('progressCount');
+    var rateEl   = document.getElementById('progressRate');
+    var etaEl    = document.getElementById('progressEta');
+    var errEl    = document.getElementById('progressError');
+    var doneEl   = document.getElementById('progressDone');
+    var doneLabel= document.getElementById('doneLabel');
+    var dlLink   = document.getElementById('downloadLink');
+    var doneStats= document.getElementById('doneStats');
+    if (!form) return;
+
+    var currentJobId = null;
+
+    function fmtTime(s) {
+      if (s == null) return '—';
+      if (s < 60)  return s.toFixed(0) + ' с';
+      if (s < 3600) return Math.floor(s / 60) + ' мин ' + Math.round(s % 60) + ' с';
+      return Math.floor(s / 3600) + ' ч ' + Math.round((s % 3600) / 60) + ' мин';
+    }
+
+    function resetUI() {
+      wrap.style.display = 'block';
+      errEl.style.display = 'none';
+      doneEl.style.display = 'none';
+      fill.style.width = '0%';
+      count.textContent = '0 / 0';
+      rateEl.textContent = '—';
+      etaEl.textContent = '—';
+      label.textContent = 'Готовлю...';
+      spinner.style.display = 'inline-block';
+    }
+
+    function showError(msg) {
+      errEl.textContent = msg;
+      errEl.style.display = 'block';
+      label.textContent = 'Ошибка';
+      spinner.style.display = 'none';
+      submit.disabled = false;
+      cancelBtn.style.display = 'none';
+      currentJobId = null;
+    }
+
+    function showFinal(status, jobId, snapshot) {
+      // status: 'done' or 'cancelled'
+      spinner.style.display = 'none';
+      submit.disabled = false;
+      cancelBtn.style.display = 'none';
+      currentJobId = null;
+
+      var pct = snapshot.total ? (snapshot.processed / snapshot.total * 100) : 0;
+      fill.style.width = pct.toFixed(1) + '%';
+
+      if (status === 'cancelled') {
+        label.textContent = 'Остановлено';
+        doneLabel.textContent = 'Остановлено.';
+        doneStats.textContent = '· обработано ' + snapshot.processed.toLocaleString()
+                              + ' из ' + snapshot.total.toLocaleString()
+                              + ' за ' + fmtTime(snapshot.elapsed_s);
+      } else {
+        label.textContent = 'Готово';
+        doneLabel.textContent = 'Готово.';
+        doneStats.textContent = '· ' + snapshot.total.toLocaleString()
+                              + ' строк за ' + fmtTime(snapshot.elapsed_s);
+      }
+      if (snapshot.download_ready) {
+        dlLink.href = '/match/batch/' + jobId + '/download';
+        dlLink.style.display = '';
+      } else {
+        dlLink.style.display = 'none';
+      }
+      doneEl.style.display = 'block';
+    }
+
+    async function poll(jobId) {
+      if (currentJobId !== jobId) return;  // stale (user started new run)
+      try {
+        var r = await fetch('/match/batch/' + jobId);
+        if (!r.ok) throw new Error('status ' + r.status);
+        var s = await r.json();
+        var pct = s.total ? (s.processed / s.total * 100) : 0;
+        fill.style.width = pct.toFixed(1) + '%';
+        count.textContent = s.processed.toLocaleString() + ' / ' + s.total.toLocaleString()
+                          + ' (' + pct.toFixed(0) + '%)';
+        rateEl.textContent = s.rate_per_s ? s.rate_per_s.toFixed(1) + ' / сек' : '—';
+        etaEl.textContent  = 'ETA ' + fmtTime(s.eta_s);
+
+        if (s.status === 'pending') label.textContent = 'В очереди...';
+        else if (s.cancel_requested && s.status === 'running') label.textContent = 'Останавливаю...';
+        else if (s.status === 'running') label.textContent = 'Распознаю...';
+
+        if (s.status === 'failed')    { showError(s.error || 'Failed'); return; }
+        if (s.status === 'cancelled') { showFinal('cancelled', jobId, s); return; }
+        if (s.status === 'done')      { showFinal('done', jobId, s); return; }
+        setTimeout(function () { poll(jobId); }, 500);
+      } catch (e) {
+        showError('Сетевая ошибка: ' + e.message);
+      }
+    }
+
+    cancelBtn.addEventListener('click', async function () {
+      if (!currentJobId) return;
+      cancelBtn.disabled = true;
+      label.textContent = 'Останавливаю...';
+      try {
+        await fetch('/match/batch/' + currentJobId + '/cancel', { method: 'POST' });
+      } catch (e) {
+        showError('Не удалось остановить: ' + e.message);
+      }
+      cancelBtn.disabled = false;
+    });
+
+    form.addEventListener('submit', async function (e) {
+      e.preventDefault();
+      if (!fileEl.files.length) return;
+      submit.disabled = true;
+      cancelBtn.style.display = 'inline-block';
+      cancelBtn.disabled = false;
+      resetUI();
+
+      var fd = new FormData();
+      fd.append('file',  fileEl.files[0]);
+      fd.append('top_n', topNEl.value);
+      try {
+        var r = await fetch('/match/batch', { method: 'POST', body: fd });
+        if (!r.ok) {
+          var detail = '';
+          try { detail = (await r.json()).detail || ''; } catch (_) {}
+          throw new Error('HTTP ' + r.status + ' ' + detail);
+        }
+        var data = await r.json();
+        currentJobId = data.job_id;
+        label.textContent = 'Файл принят, читаю...';
+        poll(data.job_id);
+      } catch (e) {
+        showError('Не удалось загрузить файл: ' + e.message);
+      }
+    });
   })();
 </script>
 </body>
