@@ -129,10 +129,38 @@ def process_dataframe(
 
 
 def to_xlsx_bytes(df: pd.DataFrame) -> bytes:
-    """Serialize a DataFrame to xlsx bytes."""
+    """Serialize a DataFrame to xlsx bytes.
+
+    Percentage columns (anything matching ``*_percent`` or already named with
+    ``%``) get an Excel cell format of ``0.0"%"`` so the visible value is
+    e.g. "95.0%" while the underlying numeric value (95.0) is preserved for
+    sorting / filtering / formulas.
+    """
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name="matches")
+        ws = writer.sheets["matches"]
+        # Identify percent columns by name.
+        percent_cols: list[int] = []
+        for idx, name in enumerate(df.columns, start=1):
+            lname = str(name).lower()
+            if lname.endswith("_percent") or "точность %" in lname or "вероятность %" in lname:
+                percent_cols.append(idx)
+        if percent_cols:
+            # Apply number format to every data row in those columns.
+            from openpyxl.utils import get_column_letter
+            for col_idx in percent_cols:
+                letter = get_column_letter(col_idx)
+                # Skip header (row 1); apply to all data rows.
+                for row in range(2, ws.max_row + 1):
+                    ws[f"{letter}{row}"].number_format = '0.0"%"'
+        # Auto-size width heuristic: cap at 60 chars to keep things readable.
+        from openpyxl.utils import get_column_letter
+        for idx, name in enumerate(df.columns, start=1):
+            letter = get_column_letter(idx)
+            sample = df.iloc[:, idx - 1].head(100).tolist()
+            max_len = max([len(str(name))] + [len(str(v)) for v in sample])
+            ws.column_dimensions[letter].width = min(max(max_len + 2, 10), 60)
     buf.seek(0)
     return buf.getvalue()
 

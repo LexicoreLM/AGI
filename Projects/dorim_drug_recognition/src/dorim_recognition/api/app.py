@@ -7,6 +7,7 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncIterator
+from urllib.parse import quote
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, Response
@@ -197,10 +198,17 @@ def batch_download(job_id: str) -> Response:
         raise HTTPException(status_code=404, detail="job not found")
     if job.result_bytes is None or job.status not in ("done", "cancelled"):
         raise HTTPException(status_code=409, detail=f"job not ready (status={job.status})")
+    # RFC 6266: ASCII fallback + percent-encoded UTF-8 for non-ASCII filenames.
+    filename = job.result_filename or "result.xlsx"
+    ascii_fallback = filename.encode("ascii", "replace").decode("ascii").replace('"', "_")
+    disposition = (
+        f'attachment; filename="{ascii_fallback}"; '
+        f"filename*=UTF-8''{quote(filename, safe='')}"
+    )
     return Response(
         content=job.result_bytes,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f'attachment; filename="{job.result_filename}"'},
+        headers={"Content-Disposition": disposition},
     )
 
 

@@ -88,6 +88,18 @@ def analyze(in_path: Path, out_path: Path) -> None:
     ru = pd.DataFrame(cols)
     with pd.ExcelWriter(out_path, engine="openpyxl") as w:
         ru.to_excel(w, index=False, sheet_name="результаты")
+        ws = w.sheets["результаты"]
+        # Apply percentage cell format to columns whose header contains "%".
+        from openpyxl.utils import get_column_letter
+        for idx, name in enumerate(ru.columns, start=1):
+            letter = get_column_letter(idx)
+            if "%" in str(name):
+                for row in range(2, ws.max_row + 1):
+                    ws[f"{letter}{row}"].number_format = '0.0"%"'
+            # Width heuristic (defensive: explicit str() per element).
+            sample = ru.iloc[:, idx - 1].head(100).tolist()
+            max_len = max([len(str(name))] + [len(str(v)) for v in sample])
+            ws.column_dimensions[letter].width = min(max(max_len + 2, 10), 60)
     print()
     print(f"Расширенный файл с понятными колонками: {out_path}")
 
