@@ -82,6 +82,29 @@ class MatchResult:
     exact_alias_hit: bool = False
 
 
+@dataclass
+class VerifyResult:
+    """Result of verifying that a (name, maker) → drug_id binding is correct.
+
+    See ``_verdict_for`` for the authoritative list of ``verdict`` values.
+    """
+
+    drug_id: int
+    product_search_string: str | None  # None iff drug_id is not in catalog
+    confidence: float                  # 0..1, weighted hybrid score
+    components: dict[str, float]       # fuzzy / tfidf / maker / dosage
+    verdict: str
+    alias_match: bool                  # exact-alias short-circuit returned drug_id
+    alias_conflict_with: int | None    # existing alias points to a different drug
+    engine_top_pick: MatchCandidate | None  # what match() would pick instead
+    stage_ms: dict[str, float]
+
+    @property
+    def engine_agrees(self) -> bool:
+        """True iff the engine's own top pick matches ``drug_id``."""
+        return self.engine_top_pick is not None and self.engine_top_pick.product_id == self.drug_id
+
+
 # -----------------------------------------------------------------------------
 # Index cache: catalog + TF-IDF
 # -----------------------------------------------------------------------------
@@ -463,3 +486,169 @@ def match_batch(queries: Sequence[MatchQuery], *, top_n: int = 5) -> list[MatchR
     queries could be batched in a future optimization, but the per-query
     work is dominated by the DB roundtrip anyway."""
     return [match(q, top_n=top_n) for q in queries]
+
+
+# -----------------------------------------------------------------------------
+# Verify: score a proposed (name, maker) -> drug_id binding
+# -----------------------------------------------------------------------------
+
+def _score_pair(
+    index: _CatalogIndex,
+    settings: Settings,
+    pos: int,
+    n_name: str,
+    n_maker: str,
+    q_feats: DosageFeatures,
+) -> tuple[float, dict[str, float]]:
+    """Compute the weighted hybrid score for a single (query, product) pair.
+
+    Returns ``(final_score, components_dict)``. Shared between ``_rerank``
+    (vectorized) and ``verify_binding`` (one-shot). Keeping it here means a
+    weight change in ``Settings`` automatically applies to both code paths.
+    """
+    product_norm = index.normalized[pos]
+    fuzzy = fuzz.token_set_ratio(n_name, product_norm) / 100.0
+    maker = _maker_score(
+        n_maker, index.makers_canonical[pos], index.countries[pos], product_norm,
+    )
+    dose = dosage_similarity(q_feats, index.dose_features[pos])
+
+    query_vec = index.vectorizer.transform([n_name])
+    query_vec = l2_normalize(query_vec, norm="l2", copy=False)
+    product_vec = index.tfidf_matrix[pos : pos + 1]
+    tfidf = float((product_vec @ query_vec.T).toarray().ravel()[0])
+
+    final = (
+        settings.w_fuzzy * fuzzy
+        + settings.w_tfidf * tfidf
+        + settings.w_maker * maker
+        + settings.w_dosage * dose
+    )
+    return float(final), {
+        "fuzzy": round(fuzzy, 4),
+        "tfidf": round(tfidf, 4),
+        "maker": round(maker, 4),
+        "dosage": round(dose, 4),
+    }
+
+
+# Verdict catalog: single source of truth shared by ``_verdict_for`` (which
+# emits keys) and API consumers (which need human-readable labels). Keys must
+# stay in sync with the branches in ``_verdict_for``.
+VERDICT_LABELS: dict[str, str] = {
+    "exact_alias":         "точное совпадение с подтверждённой привязкой",
+    "conflict_with_alias": "конфликт: эта же пара уже привязана к другому товару",
+    "highly_likely":       "высокая вероятность правильной привязки",
+    "likely":              "скорее правильная привязка",
+    "plausible":           "правдоподобная, требует проверки",
+    "unlikely":            "сомнительная привязка",
+    "unknown_drug":        "товар не найден в каталоге",
+    "empty_query":         "пустое название после нормализации",
+}
+
+
+def _verdict_for(
+    confidence: float,
+    alias_match: bool,
+    alias_conflict: bool,
+) -> str:
+    """Map (confidence, alias signals) to a verdict key from ``VERDICT_LABELS``.
+
+    Note: ``unknown_drug`` and ``empty_query`` are emitted directly by
+    ``verify_binding`` before this function is reached.
+    """
+    if alias_match:
+        return "exact_alias"
+    if alias_conflict:
+        return "conflict_with_alias"
+    if confidence >= 0.85:
+        return "highly_likely"
+    if confidence >= 0.65:
+        return "likely"
+    if confidence >= 0.50:
+        return "plausible"
+    return "unlikely"
+
+
+def _empty_verify_result(drug_id: int, verdict: str) -> VerifyResult:
+    """Build a VerifyResult for short-circuit cases (unknown drug, empty query)."""
+    return VerifyResult(
+        drug_id=drug_id,
+        product_search_string=None,
+        confidence=0.0,
+        components={},
+        verdict=verdict,
+        alias_match=False,
+        alias_conflict_with=None,
+        engine_top_pick=None,
+        stage_ms={},
+    )
+
+
+def verify_binding(
+    query: MatchQuery,
+    drug_id: int,
+    *,
+    include_top_pick: bool = True,
+) -> VerifyResult:
+    """Score the proposed binding (query → drug_id).
+
+    Returns confidence in [0, 1] for the *specific* binding plus, for
+    context, what the engine would have picked on its own. Useful for QC
+    of historical mappings: feed (contractor_name, contractor_maker,
+    our_drug_id) and the response tells you how plausible that mapping is.
+
+    See ``VERDICT_LABELS`` for the full set of verdict values.
+    """
+    settings = get_settings()
+    index = get_index()
+    timings: dict[str, float] = {}
+
+    n_name = normalize_text(query.name)
+    n_maker = normalize_maker(query.maker_name) if query.maker_name else ""
+
+    if not n_name:
+        return _empty_verify_result(drug_id, "empty_query")
+    pos = index.id_to_pos.get(drug_id)
+    if pos is None:
+        return _empty_verify_result(drug_id, "unknown_drug")
+
+    # --- Per-pair score ---
+    t = time.perf_counter()
+    q_feats = extract_dosage_features(n_name)
+    confidence, components = _score_pair(index, settings, pos, n_name, n_maker, q_feats)
+    timings["score"] = (time.perf_counter() - t) * 1000
+
+    # --- Alias short-circuit lookup ---
+    t = time.perf_counter()
+    with raw_connection(autocommit=True) as conn:
+        sc_product_id = _alias_short_circuit(conn, settings, n_name, n_maker)
+    timings["alias"] = (time.perf_counter() - t) * 1000
+
+    alias_match = sc_product_id == drug_id
+    alias_conflict_with = sc_product_id if sc_product_id not in (None, drug_id) else None
+    if alias_match:
+        # Promote confidence to the exact-alias floor (same as match() does).
+        confidence = max(confidence, 0.99)
+
+    # --- Engine's own top pick (independent run, no shortcircuit so we get
+    #     a fair fuzzy score for comparison even when the alias would override).
+    engine_top: MatchCandidate | None = None
+    if include_top_pick:
+        t = time.perf_counter()
+        top_res = match(query, top_n=1, use_alias_shortcircuit=False)
+        timings["top_pick"] = (time.perf_counter() - t) * 1000
+        if top_res.candidates:
+            engine_top = top_res.candidates[0]
+
+    return VerifyResult(
+        drug_id=drug_id,
+        product_search_string=index.search_strings[pos],
+        confidence=round(confidence, 4),
+        components=components,
+        verdict=_verdict_for(confidence, alias_match, bool(alias_conflict_with)),
+        alias_match=alias_match,
+        alias_conflict_with=alias_conflict_with,
+        engine_top_pick=engine_top,
+        stage_ms={k: round(v, 2) for k, v in timings.items()},
+    )

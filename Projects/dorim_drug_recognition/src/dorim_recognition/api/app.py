@@ -22,10 +22,18 @@ from dorim_recognition.api.schemas import (
     MatchCandidateOut,
     MatchRequest,
     MatchResponse,
+    VerifyRequest,
+    VerifyResponse,
 )
 from dorim_recognition.core.config import get_settings
 from dorim_recognition.db.connection import raw_connection
-from dorim_recognition.matching.engine import MatchQuery, get_index, match
+from dorim_recognition.matching.engine import (
+    VERDICT_LABELS,
+    MatchQuery,
+    get_index,
+    match,
+    verify_binding,
+)
 
 
 BASE = Path(__file__).resolve().parent.parent
@@ -78,16 +86,7 @@ def match_endpoint(req: MatchRequest) -> MatchResponse:
         MatchQuery(name=req.name, maker_name=req.maker_name, contractor_id=req.contractor_id),
         top_n=req.top_n,
     )
-    candidates = [
-        MatchCandidateOut(
-            product_id=c.product_id,
-            search_string=c.search_string,
-            confidence=c.confidence,
-            confidence_percent=round(c.confidence * 100, 1),
-            components=c.components,
-        )
-        for c in res.candidates
-    ]
+    candidates = [_candidate_out(c) for c in res.candidates]
     # Telemetry — fire-and-forget.
     try:
         _log_match(req, res)
@@ -123,6 +122,51 @@ def _log_match(req: MatchRequest, res) -> None:
                     json.dumps(res.stage_ms),
                 ),
             )
+
+
+def _candidate_out(c) -> MatchCandidateOut:
+    """Engine ``MatchCandidate`` → API ``MatchCandidateOut``.
+
+    Single conversion point; ``confidence_percent`` derives via the
+    model's ``computed_field`` so callers never re-do ``round(x*100, 1)``.
+    """
+    return MatchCandidateOut(
+        product_id=c.product_id,
+        search_string=c.search_string,
+        confidence=c.confidence,
+        components=c.components,
+    )
+
+
+@app.post("/match/verify", response_model=VerifyResponse)
+def verify_endpoint(req: VerifyRequest) -> VerifyResponse:
+    """Verify that a (name, maker) → drug_id binding is plausible.
+
+    Returns a confidence score plus a verdict the UI can render directly.
+    Designed for QC workflows: an operator can post a batch of historical
+    bindings and surface the ones the engine considers suspicious.
+    """
+    res = verify_binding(
+        MatchQuery(
+            name=req.name,
+            maker_name=req.maker_name,
+            contractor_id=req.contractor_id,
+        ),
+        req.drug_id,
+    )
+    return VerifyResponse(
+        drug_id=res.drug_id,
+        product_search_string=res.product_search_string,
+        confidence=res.confidence,
+        components=res.components,
+        verdict=res.verdict,
+        verdict_label=VERDICT_LABELS.get(res.verdict, res.verdict),
+        alias_match=res.alias_match,
+        alias_conflict_with=res.alias_conflict_with,
+        engine_top_pick=_candidate_out(res.engine_top_pick) if res.engine_top_pick else None,
+        stage_ms=res.stage_ms,
+        external_code=req.external_code,
+    )
 
 
 @app.post("/match/batch")
